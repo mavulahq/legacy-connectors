@@ -20,4 +20,4 @@ jobs:
           sudo apt-get update
           sudo apt-get install --yes gnucobol
           printf '>>SOURCE FORMAT FREE\nIDENTIFICATION DIVISION.\nPROGRAM-ID. COPYCHECK.\nDATA DIVISION.\nWORKING-STORAGE SECTION.\nCOPY "contracts/regulatory-transaction-export/v1/regulatory-transaction-export.v1.cpy".\nPROCEDURE DIVISION.\nSTOP RUN.\n' > /tmp/copycheck.cob
-          cobc -fsyntax-only -I . /tmp/copycheck.cob
+          cobc -free -fsyntax-only -I . /tmp/copycheck.cob

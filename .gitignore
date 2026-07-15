@@ -1,0 +1,17 @@
+node_modules/
+dist/
+coverage/
+*.log
+.env
+.env.*
+!.env.example
+.agents/*
+!.agents/AGENTS.md
+!.agents/skills/
+.agents/skills/*
+!.agents/skills/mavula-review/
+.agents/skills/mavula-review/*
+!.agents/skills/mavula-review/SKILL.md
+!.agents/skills/mavula-review/agents/
+.agents/skills/mavula-review/agents/*
+!.agents/skills/mavula-review/agents/openai.yaml

@@ -1,0 +1,23 @@
+name: Required CI
+on:
+  pull_request: {}
+  push: { branches: [main] }
+permissions: { contents: read }
+jobs:
+  required:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v6
+        with: { version: 10.33.0 }
+      - uses: actions/setup-node@v6
+        with: { node-version: 22.22.3, cache: pnpm }
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm guardian:check
+      - run: pnpm test
+      - name: Validate COBOL copybook syntax
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes gnucobol
+          printf '>>SOURCE FORMAT FREE\nIDENTIFICATION DIVISION.\nPROGRAM-ID. COPYCHECK.\nDATA DIVISION.\nWORKING-STORAGE SECTION.\nCOPY "contracts/regulatory-transaction-export/v1/regulatory-transaction-export.v1.cpy".\nPROCEDURE DIVISION.\nSTOP RUN.\n' > /tmp/copycheck.cob
+          cobc -fsyntax-only -I . /tmp/copycheck.cob

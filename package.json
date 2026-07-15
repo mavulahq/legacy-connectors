@@ -2,10 +2,23 @@
   "name": "@mavula/legacy-connectors",
   "version": "0.1.0",
   "private": true,
+  "type": "module",
   "description": "MAVULA legacy interoperability contracts and validators.",
   "author": "EstandarMustaq <estandarmustaq@mavula.io>",
   "license": "AGPL-3.0-only",
   "packageManager": "pnpm@10.33.0",
   "engines": { "node": "22.22.3", "pnpm": "10.33.0" },
-  "scripts": { "guardian:check": "node scripts/guardian.mjs" }
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" } },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "guardian:check": "node scripts/guardian.mjs",
+    "legacy:validate": "node dist/cli.js",
+    "test": "pnpm build && node --test test/*.test.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "5.3.3"
+  }
 }

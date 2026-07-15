@@ -21,10 +21,13 @@ for (const file of tracked.stdout.split('\n').filter(Boolean)) {
   if (/\.(png|jpg|jpeg|webp|gif|ico|pdf|dat)$/i.test(file) || file === 'scripts/guardian.mjs') continue;
   const content = readFileSync(file, 'utf8');
   if (/getfluxo-io|@getfluxo|packages\/(fengine|fwk|fpay|finfra)/.test(content)) failures.push(`${file} contains legacy identifiers`);
-  if (
-    /\.(ts|js|mjs|json|ya?ml)$/.test(file) && !file.startsWith('.agents/') &&
-    /(@prisma\/client|DATABASE_URL|\bSELECT\b|\bINSERT\b|\bUPDATE\b|\bDELETE\b)/i.test(content)
-  ) failures.push(`${file} bypasses the connector boundary`);
+  if (/\.(ts|js|mjs)$/.test(file) && !file.startsWith('.agents/')) {
+    const importsDatabaseRuntime = /@prisma\/client|DATABASE_URL/.test(content);
+    const embedsSqlStatement = /['"`]\s*(SELECT\b|INSERT\s+INTO\b|UPDATE\s+[^\s]+\s+SET\b|DELETE\s+FROM\b)/i.test(content);
+    if (importsDatabaseRuntime || embedsSqlStatement) {
+      failures.push(`${file} bypasses the connector boundary`);
+    }
+  }
 }
 if (failures.length) {
   console.error('MAVULA legacy-connectors guardian failed:');

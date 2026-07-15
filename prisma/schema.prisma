@@ -1,0 +1,67 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model LegacyBatchReceipt {
+  id                   String   @id
+  tenantId             String
+  institutionId        String
+  direction            String
+  contractId           String
+  idempotencyKeyDigest String
+  requestHash          String
+  correlationId        String
+  requestedBy          String
+  state                String
+  request              Json
+  sourceCount          Int      @default(0)
+  recordCount          Int      @default(0)
+  totalAmountMinor     String   @default("0")
+  contentSha256        String?
+  rejectionReport      Json
+  attempts             Int      @default(0)
+  maxAttempts          Int      @default(3)
+  leaseUntil           DateTime?
+  deliveredAt          DateTime?
+  authorityReference   String?
+  failureReason        String?
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @default(now()) @updatedAt
+  artifact             LegacyBatchArtifact?
+
+  @@unique([tenantId, direction, idempotencyKeyDigest])
+  @@index([tenantId, state, createdAt])
+  @@index([state, leaseUntil])
+  @@map("legacy_batch_receipts")
+}
+
+model LegacyBatchArtifact {
+  id            String   @id
+  tenantId      String
+  receiptId     String   @unique
+  filename      String
+  mediaType     String
+  byteLength    Int
+  contentSha256 String
+  content       Bytes
+  createdAt     DateTime @default(now())
+  receipt       LegacyBatchReceipt @relation(fields: [receiptId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, createdAt])
+  @@map("legacy_batch_artifacts")
+}
+
+model LegacyBatchAttempt {
+  id         String   @id
+  tenantId   String
+  receiptId  String
+  attempt    Int
+  result     String
+  errorCode  String?
+  recordedAt DateTime @default(now())
+
+  @@unique([receiptId, attempt])
+  @@index([tenantId, receiptId])
+  @@map("legacy_batch_attempts")
+}

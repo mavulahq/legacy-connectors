@@ -6,6 +6,20 @@ permissions: { contents: read }
 jobs:
   required:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: mavula
+          POSTGRES_PASSWORD: mavula_dev
+          POSTGRES_DB: mavula
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U mavula -d mavula" --health-interval=10s --health-timeout=5s --health-retries=5
+    env:
+      LEGACY_CONNECTORS_MIGRATION_DATABASE_URL: postgresql://mavula:mavula_dev@127.0.0.1:5432/mavula?schema=legacy_connectors
+      LEGACY_CONNECTORS_DATABASE_ROLE_PASSWORD: mavula_legacy_ci_password
+      LEGACY_CONNECTORS_DATABASE_URL: postgresql://legacy_connectors_app:mavula_legacy_ci_password@127.0.0.1:5432/mavula?schema=legacy_connectors
     steps:
       - uses: actions/checkout@v6
       - uses: pnpm/action-setup@v6
@@ -15,6 +29,11 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm guardian:check
       - run: pnpm test
+      - name: Validate PostgreSQL runtime isolation
+        run: |
+          DATABASE_URL="$LEGACY_CONNECTORS_MIGRATION_DATABASE_URL" pnpm prisma:migrate
+          pnpm database:provision-role
+          pnpm test:postgres
       - name: Validate COBOL copybook syntax
         run: |
           sudo apt-get update

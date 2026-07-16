@@ -7,5 +7,26 @@
   "license": "AGPL-3.0-only",
   "packageManager": "pnpm@10.33.0",
   "engines": { "node": "22.22.3", "pnpm": "10.33.0" },
-  "scripts": { "guardian:check": "node scripts/guardian.mjs" }
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": ["dist", "contracts", "prisma", "README.md", "LICENSE"],
+  "exports": { ".": { "types": "./dist/index.d.ts", "require": "./dist/index.js", "default": "./dist/index.js" } },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "guardian:check": "node scripts/guardian.mjs",
+    "legacy:validate": "node dist/cli.js",
+    "test": "pnpm build && node --test test/*.test.mjs",
+    "test:postgres": "pnpm build && LEGACY_CONNECTORS_RLS_TEST=true node --test test/postgres-runtime.test.mjs",
+    "prisma:migrate": "prisma migrate deploy --schema prisma/schema.prisma",
+    "database:provision-role": "node scripts/provision-database-role.mjs"
+  },
+  "dependencies": {
+    "pg": "^8.13.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/pg": "^8.11.10",
+    "prisma": "5.7.0",
+    "typescript": "5.3.3"
+  }
 }

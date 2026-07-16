@@ -1,0 +1,59 @@
+{
+  "contract_id": "legacy.regulatory_transaction_export@1",
+  "record_length": 2048,
+  "encoding": "US-ASCII",
+  "line_ending": "LF",
+  "content_hash_scope": "header_and_detail_records_joined_by_lf_without_trailing_lf",
+  "records": {
+    "H": {
+      "fields": [
+        { "name": "record_type", "offset": 1, "length": 1, "type": "literal", "value": "H" },
+        { "name": "layout_id", "offset": 2, "length": 32, "type": "text" },
+        { "name": "layout_version", "offset": 34, "length": 3, "type": "unsigned" },
+        { "name": "export_id", "offset": 37, "length": 64, "type": "text" },
+        { "name": "tenant_id", "offset": 101, "length": 64, "type": "text" },
+        { "name": "institution_id", "offset": 165, "length": 64, "type": "text" },
+        { "name": "period_from", "offset": 229, "length": 8, "type": "date_yyyymmdd" },
+        { "name": "period_to", "offset": 237, "length": 8, "type": "date_yyyymmdd" },
+        { "name": "generated_at", "offset": 245, "length": 20, "type": "timestamp" },
+        { "name": "reserved", "offset": 265, "length": 1784, "type": "spaces" }
+      ]
+    },
+    "D": {
+      "fields": [
+        { "name": "record_type", "offset": 1, "length": 1, "type": "literal", "value": "D" },
+        { "name": "record_id", "offset": 2, "length": 64, "type": "text" },
+        { "name": "transaction_id", "offset": 66, "length": 64, "type": "text" },
+        { "name": "transaction_type", "offset": 130, "length": 32, "type": "text" },
+        { "name": "instruction_method", "offset": 162, "length": 8, "type": "text" },
+        { "name": "source_party_id", "offset": 170, "length": 64, "type": "text" },
+        { "name": "source_account_id", "offset": 234, "length": 64, "type": "text" },
+        { "name": "destination_party_id", "offset": 298, "length": 64, "type": "text" },
+        { "name": "destination_account_id", "offset": 362, "length": 64, "type": "text" },
+        { "name": "counterparty_id", "offset": 426, "length": 64, "type": "text" },
+        { "name": "amount", "offset": 490, "length": 18, "type": "money_minor" },
+        { "name": "currency", "offset": 508, "length": 3, "type": "currency" },
+        { "name": "occurred_at", "offset": 511, "length": 20, "type": "timestamp" },
+        { "name": "recorded_at", "offset": 531, "length": 20, "type": "timestamp" },
+        { "name": "correlation_id", "offset": 551, "length": 64, "type": "text" },
+        { "name": "retention_until", "offset": 615, "length": 8, "type": "date_yyyymmdd" },
+        { "name": "legal_basis_code", "offset": 623, "length": 64, "type": "text" },
+        { "name": "adjustment_type", "offset": 687, "length": 10, "type": "text_optional" },
+        { "name": "original_transaction_id", "offset": 697, "length": 64, "type": "text_optional" },
+        { "name": "reversal_transaction_id", "offset": 761, "length": 64, "type": "text_optional" },
+        { "name": "replacement_transaction_id", "offset": 825, "length": 64, "type": "text_optional" },
+        { "name": "reserved", "offset": 889, "length": 1160, "type": "spaces" }
+      ]
+    },
+    "T": {
+      "fields": [
+        { "name": "record_type", "offset": 1, "length": 1, "type": "literal", "value": "T" },
+        { "name": "record_count", "offset": 2, "length": 10, "type": "unsigned" },
+        { "name": "total_amount", "offset": 12, "length": 20, "type": "money_minor" },
+        { "name": "content_sha256", "offset": 32, "length": 64, "type": "sha256" },
+        { "name": "export_id", "offset": 96, "length": 64, "type": "text" },
+        { "name": "reserved", "offset": 160, "length": 1889, "type": "spaces" }
+      ]
+    }
+  }
+}

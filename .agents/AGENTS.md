@@ -1,5 +1,12 @@
 # MAVULA Agent Entry Point
 
-Use `.agents/skills/mavula-review/SKILL.md` for MAVULA code reviews, security reviews, database reviews, and cross-repository implementation checks.
+Use `.agents/skills/mavula-cloud-banking/SKILL.md` for architecture, implementation,
+production readiness, security, operations, scalability, and configurable banking
+workflows.
 
-Keep this directory focused on reusable agent instructions. Do not add local transcripts, prompts, generated reports, credentials, or temporary agent state.
+Use `.agents/skills/mavula-review/SKILL.md` for pull request, security, database,
+migration, contract, and production-readiness reviews. Production-impact reviews
+must also load the relevant `mavula-cloud-banking` reference.
+
+Keep `.agents` limited to canonical reusable instructions. Never add transcripts,
+local prompts, generated reports, credentials, or temporary agent state.

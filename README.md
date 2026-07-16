@@ -1,6 +1,6 @@
 # MAVULA Legacy Connectors
 
-Versioned legacy financial interoperability contracts and validation tooling.
+Versioned legacy financial interoperability contracts and durable batch runtime.
 
 This boundary owns COBOL copybooks, fixed-width layouts and deterministic batch
 validation. It never accesses Identity Access or Ledger Core stores directly.
@@ -8,8 +8,10 @@ validation. It never accesses Identity Access or Ledger Core stores directly.
 ## Regulatory transaction export v1
 
 The first contract provides a 2048-byte US-ASCII header/detail/trailer layout,
-COBOL copybook, SHA-256 reconciliation, synthetic golden file and deterministic
-rejection report. It is validation-only and does not generate or submit batches.
+COBOL copybook, deterministic generation, SHA-256 reconciliation, durable
+idempotency receipts and deterministic rejection reports. Imports are staged and
+validated only. This boundary never posts ledger entries or mutates financial
+state.
 
 ```bash
 pnpm test

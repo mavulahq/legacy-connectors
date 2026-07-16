@@ -10,6 +10,9 @@ const required = [
   '.github/workflows/required-ci.yml', 'LICENSE', 'README.md', 'package.json',
   'contracts/regulatory-transaction-export/v1/layout.json',
   'contracts/regulatory-transaction-export/v1/regulatory-transaction-export.v1.cpy',
+  'prisma/schema.prisma',
+  'src/batch-runtime.ts',
+  'src/generator.ts',
 ];
 for (const file of required) if (!existsSync(file)) failures.push(`${file} is required`);
 const pkg = JSON.parse(readFileSync('package.json', 'utf8'));
@@ -21,11 +24,12 @@ for (const file of tracked.stdout.split('\n').filter(Boolean)) {
   if (/\.(png|jpg|jpeg|webp|gif|ico|pdf|dat)$/i.test(file) || file === 'scripts/guardian.mjs') continue;
   const content = readFileSync(file, 'utf8');
   if (/getfluxo-io|@getfluxo|packages\/(fengine|fwk|fpay|finfra)/.test(content)) failures.push(`${file} contains legacy identifiers`);
-  if (/\.(ts|js|mjs)$/.test(file) && !file.startsWith('.agents/')) {
-    const importsDatabaseRuntime = /@prisma\/client|DATABASE_URL/.test(content);
-    const embedsSqlStatement = /['"`]\s*(SELECT\b|INSERT\s+INTO\b|UPDATE\s+[^\s]+\s+SET\b|DELETE\s+FROM\b)/i.test(content);
-    if (importsDatabaseRuntime || embedsSqlStatement) {
-      failures.push(`${file} bypasses the connector boundary`);
+  if (/\.(ts|js|mjs|sql|prisma)$/.test(file) && !file.startsWith('.agents/')) {
+    if (/@mavula\/(ledger-core|identity-access)|@prisma\/client/.test(content)) {
+      failures.push(`${file} imports another owner runtime`);
+    }
+    if (/\b(financial_transactions|journal_entries|accounts|loans|operators|credentials|memberships)\b/i.test(content)) {
+      failures.push(`${file} accesses data owned by another bounded context`);
     }
   }
 }

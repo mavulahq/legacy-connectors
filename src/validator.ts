@@ -1,11 +1,12 @@
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import type { BatchValidationError, BatchValidationReport } from './types.js';
 
 interface Field { name: string; offset: number; length: number; type: string; value?: string }
 interface Layout { contract_id: string; record_length: number; records: Record<string, { fields: Field[] }> }
 
-const layout = JSON.parse(readFileSync(new URL('../contracts/regulatory-transaction-export/v1/layout.json', import.meta.url), 'utf8')) as Layout;
+const layout = JSON.parse(readFileSync(join(__dirname, '../contracts/regulatory-transaction-export/v1/layout.json'), 'utf8')) as Layout;
 
 export function validateRegulatoryTransactionExport(content: Buffer | string): BatchValidationReport {
   const buffer = Buffer.isBuffer(content) ? content : Buffer.from(content, 'utf8');

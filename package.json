@@ -13,7 +13,7 @@
   "exports": { ".": { "types": "./dist/index.d.ts", "require": "./dist/index.js", "default": "./dist/index.js" } },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "guardian:check": "node scripts/guardian.mjs",
+    "guardian:check": "node scripts/guardian.mjs && node --test scripts/check-agent-policy.test.mjs",
     "legacy:validate": "node dist/cli.js",
     "test": "pnpm build && node --test test/*.test.mjs",
     "test:postgres": "pnpm build && LEGACY_CONNECTORS_RLS_TEST=true node --test test/postgres-runtime.test.mjs",

@@ -28,7 +28,7 @@ export interface GeneratedRegulatoryExport {
 
 export function generateRegulatoryTransactionExport(input: GenerateRegulatoryExportInput): GeneratedRegulatoryExport {
   if (input.records.length > MAX_LEGACY_BATCH_RECORDS) throw new Error('LEGACY_BATCH_RECORD_LIMIT_EXCEEDED');
-  const records = [...input.records].sort((left, right) => left.record_id.localeCompare(right.record_id));
+  const records = [...input.records].sort((left, right) => bytewiseCompare(left.record_id, right.record_id));
   const header = formatRecord('H', {
     layout_id: 'MAVULA-REGULATORY-TRANSACTION', layout_version: '001', export_id: input.export_id,
     tenant_id: input.tenant_id, institution_id: input.institution_id, period_from: date(input.period_from),
@@ -75,12 +75,17 @@ function formatRecord(recordType: string, values: Record<string, unknown>): stri
 
 function timestamp(value: string): string {
   const parsed = new Date(value);
-  if (Number.isNaN(parsed.valueOf())) throw new Error('LEGACY_TIMESTAMP_INVALID');
+  const canonicalInput = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(value)
+    ? value.replace('Z', '.000Z')
+    : value;
+  if (Number.isNaN(parsed.valueOf()) || parsed.toISOString() !== canonicalInput) throw new Error('LEGACY_TIMESTAMP_INVALID');
   return parsed.toISOString().replace(/[-:]/g, '').replace('.', '');
 }
 
 function date(value: string): string {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) throw new Error('LEGACY_DATE_INVALID');
+  const parsed = new Date(`${value}T00:00:00.000Z`);
+  if (Number.isNaN(parsed.valueOf()) || parsed.toISOString().slice(0, 10) !== value) throw new Error('LEGACY_DATE_INVALID');
   return value.replaceAll('-', '');
 }
 
@@ -93,4 +98,8 @@ function assertAscii(value: string, field: string): void {
   if ([...value].some((character) => character.charCodeAt(0) < 0x20 || character.charCodeAt(0) > 0x7e)) {
     throw new Error(`LEGACY_NON_ASCII_FIELD:${field}`);
   }
+}
+
+function bytewiseCompare(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
 }

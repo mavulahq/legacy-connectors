@@ -43,7 +43,7 @@ export function validateRegulatoryTransactionExport(content: Buffer | string): B
   if (numeric(trailer.total_amount) !== total) errors.push({ record: lines.length, field: 'total_amount', code: 'TOTAL_AMOUNT_MISMATCH' });
   if (trailer.content_sha256 !== digest) errors.push({ record: lines.length, field: 'content_sha256', code: 'CHECKSUM_MISMATCH' });
 
-  errors.sort((left, right) => left.record - right.record || left.field.localeCompare(right.field) || left.code.localeCompare(right.code));
+  errors.sort((left, right) => left.record - right.record || bytewiseCompare(left.field, right.field) || bytewiseCompare(left.code, right.code));
   return {
     contract_id: layout.contract_id,
     accepted: errors.length === 0,
@@ -82,12 +82,31 @@ function validateField(field: Field, raw: string, value: string, record: number,
   else if (field.type === 'unsigned' && !/^\d+$/.test(raw)) fail('UNSIGNED_INVALID');
   else if (field.type === 'money_minor' && !/^\d+$/.test(raw)) fail('MONEY_INVALID');
   else if (field.type === 'currency' && !/^[A-Z]{3}$/.test(raw)) fail('CURRENCY_INVALID');
-  else if (field.type === 'date_yyyymmdd' && !/^\d{8}$/.test(raw)) fail('DATE_INVALID');
-  else if (field.type === 'timestamp' && !/^\d{8}T\d{9}Z$/.test(value)) fail('TIMESTAMP_INVALID');
+  else if (field.type === 'date_yyyymmdd' && !validCompactDate(raw)) fail('DATE_INVALID');
+  else if (field.type === 'timestamp' && !validCompactTimestamp(value)) fail('TIMESTAMP_INVALID');
   else if (field.type === 'sha256' && !/^[a-f0-9]{64}$/.test(raw)) fail('SHA256_INVALID');
   else if (field.type === 'text' && value.length === 0) fail('TEXT_REQUIRED');
 }
 
 function numeric(value: string | undefined): bigint {
   return /^\d+$/.test(value || '') ? BigInt(value!) : 0n;
+}
+
+function bytewiseCompare(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function validCompactDate(value: string): boolean {
+  if (!/^\d{8}$/.test(value)) return false;
+  const iso = `${value.slice(0, 4)}-${value.slice(4, 6)}-${value.slice(6, 8)}`;
+  const parsed = new Date(`${iso}T00:00:00.000Z`);
+  return !Number.isNaN(parsed.valueOf()) && parsed.toISOString().slice(0, 10) === iso;
+}
+
+function validCompactTimestamp(value: string): boolean {
+  if (!/^\d{8}T\d{9}Z$/.test(value) || !validCompactDate(value.slice(0, 8))) return false;
+  const time = value.slice(9, 18);
+  const iso = `${value.slice(0, 4)}-${value.slice(4, 6)}-${value.slice(6, 8)}T${time.slice(0, 2)}:${time.slice(2, 4)}:${time.slice(4, 6)}.${time.slice(6, 9)}Z`;
+  const parsed = new Date(iso);
+  return !Number.isNaN(parsed.valueOf()) && parsed.toISOString() === iso;
 }

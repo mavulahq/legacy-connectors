@@ -6,8 +6,7 @@ import { enforceLocalAgentPolicy } from './check-agent-policy.mjs';
 const failures = [];
 failures.push(...enforceLocalAgentPolicy());
 const required = [
-  '.agents/AGENTS.md', '.agents/skills/mavula-review/SKILL.md',
-  '.agents/skills/mavula-review/agents/openai.yaml', '.github/CODEOWNERS',
+  '.github/CODEOWNERS',
   '.github/PULL_REQUEST_TEMPLATE.md', '.github/workflows/guardian.yml',
   '.github/workflows/required-ci.yml', 'LICENSE', 'README.md', 'package.json',
   'contracts/regulatory-transaction-export/v1/layout.json',

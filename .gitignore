@@ -6,7 +6,6 @@ coverage/
 .env.*
 !.env.example
 .agents/*
-!.agents/AGENTS.md
 !.agents/skills/
 .agents/skills/*
 !.agents/skills/mavula-review/

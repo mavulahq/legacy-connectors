@@ -55,6 +55,28 @@ test('rejects divergent reuse of an idempotency key', async () => {
   }), LegacyBatchConflictError);
 });
 
+test('includes institution and explicit generated_at in the export fingerprint', async () => {
+  const manager = new LegacyBatchManager(new MemoryLegacyBatchStore(), () => now);
+  await manager.requestExport(exportInput);
+  await assert.rejects(() => manager.requestExport({
+    ...exportInput, institution_id: 'institution_demo_002',
+  }), LegacyBatchConflictError);
+  await assert.rejects(() => manager.requestExport({
+    ...exportInput, generated_at: '2026-08-01T09:00:00.000Z',
+  }), LegacyBatchConflictError);
+});
+
+test('replays an export without client generated_at despite a later server clock', async () => {
+  let clock = now;
+  const manager = new LegacyBatchManager(new MemoryLegacyBatchStore(), () => clock);
+  const input = { ...exportInput, idempotency_key: 'idem-server-generated-at' };
+  delete input.generated_at;
+  const created = await manager.requestExport(input);
+  clock = new Date('2026-08-02T08:00:00.000Z');
+  const replay = await manager.requestExport(input);
+  assert.equal(replay.id, created.id);
+});
+
 test('rejects regulatory retention shorter than ten years', async () => {
   const manager = new LegacyBatchManager(new MemoryLegacyBatchStore(), () => now);
   await assert.rejects(() => manager.requestExport({ ...exportInput, retention_until: '2036-07-30' }), /RETENTION_PERIOD_TOO_SHORT/);
@@ -84,10 +106,23 @@ test('generates, stores and marks an export delivered idempotently', async () =>
   const artifact = await manager.getArtifact(receipt.tenant_id, receipt.id);
   assert.match(artifact.content_sha256, /^[a-f0-9]{64}$/);
   assert.match(generated.content_sha256, /^[a-f0-9]{64}$/);
-  const delivered = await manager.markDelivered(receipt.tenant_id, receipt.id, 'BM-2026-0001');
+  const delivery = {
+    tenant_id: receipt.tenant_id, receipt_id: receipt.id, institution_id: receipt.institution_id,
+    idempotency_key: 'idem-delivery-0001', correlation_id: 'corr-delivery-0001', requested_by: 'operator-1',
+    authority_reference: 'BM-2026-0001',
+  };
+  const delivered = await manager.markDelivered(delivery);
   assert.equal(delivered.state, 'DELIVERED');
-  assert.equal((await manager.markDelivered(receipt.tenant_id, receipt.id, 'BM-2026-0001')).id, receipt.id);
-  await assert.rejects(() => manager.markDelivered(receipt.tenant_id, receipt.id, 'BM-2026-0002'), LegacyBatchConflictError);
+  assert.equal((await manager.markDelivered(delivery)).id, receipt.id);
+  await assert.rejects(() => manager.markDelivered({
+    ...delivery, idempotency_key: 'idem-delivery-0002',
+  }), LegacyBatchConflictError);
+  await assert.rejects(() => manager.markDelivered({
+    ...delivery, institution_id: 'institution_other',
+  }), LegacyBatchConflictError);
+  await assert.rejects(() => manager.markDelivered({
+    ...delivery, authority_reference: 'BM-2026-0002',
+  }), LegacyBatchConflictError);
 });
 
 test('validates imports without producing financial effects', async () => {
@@ -126,4 +161,45 @@ test('leases a batch once and prevents invalid processors', async () => {
     correlation_id: 'corr-wrong-direction', requested_by: 'operator-1', filename: 'incoming.dat', content: fixture,
   });
   await assert.rejects(() => manager.processExport(staged.tenant_id, staged.id, [record]), LegacyBatchStateError);
+});
+
+test('rejects completion from a stale lease owner', async () => {
+  const store = new MemoryLegacyBatchStore();
+  const manager = new LegacyBatchManager(store, () => now);
+  const receipt = await manager.requestExport({ ...exportInput, idempotency_key: 'idem-stale-lease' });
+  await store.claim(receipt.tenant_id, receipt.id, 'EXPORT', new Date(0), 'lease-stale');
+  await store.claim(receipt.tenant_id, receipt.id, 'EXPORT', new Date(Date.now() + 60_000), 'lease-current');
+  await assert.rejects(() => store.complete(receipt.tenant_id, receipt.id, 'GENERATED', {
+    sourceCount: 0, recordCount: 0, totalAmountMinor: '0', rejections: [],
+  }, undefined, 'lease-stale'), LegacyBatchStateError);
+});
+
+test('rejects export records outside the requested period without retry', async () => {
+  const manager = new LegacyBatchManager(new MemoryLegacyBatchStore(), () => now);
+  const receipt = await manager.requestExport({ ...exportInput, idempotency_key: 'idem-outside-period' });
+  const rejected = await manager.processExport(receipt.tenant_id, receipt.id, [{
+    ...record, occurred_at: '2026-08-01T00:00:00.000Z',
+  }]);
+  assert.equal(rejected.state, 'REJECTED');
+  assert.equal(rejected.rejection_report[0].code, 'OUTSIDE_REQUESTED_PERIOD');
+});
+
+test('rejects impossible calendar dates', async () => {
+  const manager = new LegacyBatchManager(new MemoryLegacyBatchStore(), () => now);
+  await assert.rejects(() => manager.requestExport({
+    ...exportInput, idempotency_key: 'idem-impossible-date', period_from: '2026-02-30',
+  }), /LEGACY_DATE_INVALID/);
+  await assert.rejects(() => manager.requestExport({
+    ...exportInput, idempotency_key: 'idem-impossible-timestamp', generated_at: '2026-02-30T00:00:00.000Z',
+  }), /LEGACY_TIMESTAMP_INVALID/);
+});
+
+test('retries source infrastructure errors even when their code starts with LEGACY', async () => {
+  const manager = new LegacyBatchManager(new MemoryLegacyBatchStore(), () => now);
+  const receipt = await manager.requestExport({ ...exportInput, idempotency_key: 'idem-source-timeout' });
+  await assert.rejects(
+    () => manager.processExport(receipt.tenant_id, receipt.id, async () => { throw new Error('LEGACY_SOURCE_TIMEOUT'); }),
+    /LEGACY_SOURCE_TIMEOUT/,
+  );
+  assert.equal((await manager.get(receipt.tenant_id, receipt.id)).state, 'QUEUED');
 });

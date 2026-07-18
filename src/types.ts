@@ -103,11 +103,25 @@ export interface LegacyBatchReceipt {
   attempts: number;
   max_attempts: number;
   lease_until?: Date;
+  lease_token?: string;
   delivered_at?: Date;
   authority_reference?: string;
+  delivery_idempotency_key_digest?: string;
+  delivery_request_hash?: string;
   failure_reason?: string;
   created_at: Date;
   updated_at: Date;
+}
+
+export interface RecordExportDeliveryInput {
+  tenant_id: string;
+  receipt_id: string;
+  institution_id: string;
+  idempotency_key: string;
+  correlation_id: string;
+  requested_by: string;
+  authority_reference: string;
+  delivered_at?: string;
 }
 
 export interface LegacyBatchMetrics {

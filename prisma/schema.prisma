@@ -23,14 +23,20 @@ model LegacyBatchReceipt {
   attempts             Int      @default(0)
   maxAttempts          Int      @default(3)
   leaseUntil           DateTime?
+  leaseToken           String?
   deliveredAt          DateTime?
   authorityReference   String?
+  deliveryIdempotencyKeyDigest String?
+  deliveryRequestHash  String?
+  deliveryCorrelationId String?
+  deliveryRequestedBy  String?
   failureReason        String?
   createdAt            DateTime @default(now())
   updatedAt            DateTime @default(now()) @updatedAt
   artifact             LegacyBatchArtifact?
 
   @@unique([tenantId, direction, idempotencyKeyDigest])
+  @@unique([tenantId, deliveryIdempotencyKeyDigest])
   @@index([tenantId, state, createdAt])
   @@index([state, leaseUntil])
   @@map("legacy_batch_receipts")

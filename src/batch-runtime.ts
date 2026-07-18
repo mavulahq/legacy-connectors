@@ -9,6 +9,7 @@ import type {
   LegacyBatchReceipt,
   LegacyBatchState,
   RegulatoryTransactionRecord,
+  RecordExportDeliveryInput,
   StageLegacyImportInput,
 } from './types.js';
 import { LegacyBatchConflictError, LegacyBatchSourceRejectedError, LegacyBatchStateError } from './types.js';
@@ -22,16 +23,17 @@ export interface LegacyBatchStore {
   get(tenantId: string, receiptId: string): Promise<LegacyBatchReceipt | undefined>;
   list(tenantId: string, limit?: number): Promise<LegacyBatchReceipt[]>;
   artifact(tenantId: string, receiptId: string): Promise<LegacyBatchArtifact | undefined>;
-  claim(tenantId: string, receiptId: string, leaseUntil: Date): Promise<LegacyBatchReceipt | undefined>;
+  claim(tenantId: string, receiptId: string, direction: 'EXPORT' | 'IMPORT', leaseUntil: Date, leaseToken: string): Promise<LegacyBatchReceipt | undefined>;
   complete(
     tenantId: string,
     receiptId: string,
     state: 'GENERATED' | 'VALIDATED' | 'REJECTED',
     result: { sourceCount: number; recordCount: number; totalAmountMinor: string; contentSha256?: string; rejections: BatchValidationError[] },
-    artifact?: LegacyBatchArtifact,
+    artifact: LegacyBatchArtifact | undefined,
+    leaseToken: string,
   ): Promise<LegacyBatchReceipt>;
-  fail(tenantId: string, receiptId: string, reason: string): Promise<LegacyBatchReceipt>;
-  deliver(tenantId: string, receiptId: string, authorityReference: string, deliveredAt: Date): Promise<LegacyBatchReceipt>;
+  fail(tenantId: string, receiptId: string, reason: string, leaseToken: string): Promise<LegacyBatchReceipt>;
+  deliver(input: RecordExportDeliveryInput & { keyDigest: string; requestHash: string; deliveredAt: Date }): Promise<LegacyBatchReceipt>;
   metrics(tenantId: string): Promise<LegacyBatchMetrics>;
   globalMetrics(): Promise<LegacyBatchMetrics>;
   close?(): Promise<void>;
@@ -66,14 +68,30 @@ export class MemoryLegacyBatchStore implements LegacyBatchStore {
     return artifact?.tenant_id === tenantId ? cloneArtifact(artifact) : undefined;
   }
 
-  async claim(tenantId: string, receiptId: string, leaseUntil: Date): Promise<LegacyBatchReceipt | undefined> {
+  async claim(
+    tenantId: string,
+    receiptId: string,
+    direction: 'EXPORT' | 'IMPORT',
+    leaseUntil: Date,
+    leaseToken: string,
+  ): Promise<LegacyBatchReceipt | undefined> {
     const receipt = this.receipts.get(receiptId);
     const now = new Date();
-    if (!receipt || receipt.tenant_id !== tenantId || receipt.attempts >= receipt.max_attempts) return undefined;
+    if (!receipt || receipt.tenant_id !== tenantId || receipt.direction !== direction) return undefined;
+    if (receipt.state === 'PROCESSING' && receipt.lease_until && receipt.lease_until <= now && receipt.attempts >= receipt.max_attempts) {
+      receipt.state = 'FAILED';
+      receipt.failure_reason = 'LEGACY_LEASE_EXPIRED_AFTER_FINAL_ATTEMPT';
+      receipt.lease_until = undefined;
+      receipt.lease_token = undefined;
+      receipt.updated_at = now;
+      return undefined;
+    }
+    if (receipt.attempts >= receipt.max_attempts) return undefined;
     if (receipt.state !== 'QUEUED' && !(receipt.state === 'PROCESSING' && receipt.lease_until && receipt.lease_until <= now)) return undefined;
     receipt.state = 'PROCESSING';
     receipt.attempts += 1;
     receipt.lease_until = leaseUntil;
+    receipt.lease_token = leaseToken;
     receipt.updated_at = now;
     return cloneReceipt(receipt);
   }
@@ -81,44 +99,57 @@ export class MemoryLegacyBatchStore implements LegacyBatchStore {
   async complete(
     tenantId: string, receiptId: string, state: 'GENERATED' | 'VALIDATED' | 'REJECTED',
     result: { sourceCount: number; recordCount: number; totalAmountMinor: string; contentSha256?: string; rejections: BatchValidationError[] },
-    artifact?: LegacyBatchArtifact,
+    artifact: LegacyBatchArtifact | undefined,
+    leaseToken: string,
   ): Promise<LegacyBatchReceipt> {
     const receipt = required(this.receipts.get(receiptId), tenantId);
-    if (receipt.state !== 'PROCESSING') throw new LegacyBatchStateError('Batch is not being processed');
+    if (receipt.state !== 'PROCESSING' || receipt.lease_token !== leaseToken) throw new LegacyBatchStateError('Batch lease is no longer owned by this processor');
     Object.assign(receipt, {
       state, source_count: result.sourceCount, record_count: result.recordCount,
       total_amount_minor: result.totalAmountMinor, content_sha256: result.contentSha256,
-      rejection_report: structuredClone(result.rejections), lease_until: undefined, failure_reason: undefined, updated_at: new Date(),
+      rejection_report: structuredClone(result.rejections), lease_until: undefined, lease_token: undefined,
+      failure_reason: undefined, updated_at: new Date(),
     });
     if (artifact) this.artifacts.set(receiptId, cloneArtifact(artifact));
     return cloneReceipt(receipt);
   }
 
-  async fail(tenantId: string, receiptId: string, reason: string): Promise<LegacyBatchReceipt> {
+  async fail(tenantId: string, receiptId: string, reason: string, leaseToken: string): Promise<LegacyBatchReceipt> {
     const receipt = required(this.receipts.get(receiptId), tenantId);
-    if (receipt.state !== 'PROCESSING') throw new LegacyBatchStateError('Batch is not being processed');
+    if (receipt.state !== 'PROCESSING' || receipt.lease_token !== leaseToken) throw new LegacyBatchStateError('Batch lease is no longer owned by this processor');
     receipt.state = receipt.attempts >= receipt.max_attempts ? 'FAILED' : 'QUEUED';
     receipt.failure_reason = reason.slice(0, 512);
     receipt.lease_until = undefined;
+    receipt.lease_token = undefined;
     receipt.updated_at = new Date();
     return cloneReceipt(receipt);
   }
 
-  async deliver(tenantId: string, receiptId: string, authorityReference: string, deliveredAt: Date): Promise<LegacyBatchReceipt> {
-    const receipt = required(this.receipts.get(receiptId), tenantId);
-    if (receipt.state !== 'GENERATED' && receipt.state !== 'DELIVERED') throw new LegacyBatchStateError('Only generated batches can be delivered');
-    if (receipt.state === 'DELIVERED' && receipt.authority_reference !== authorityReference) {
-      throw new LegacyBatchConflictError('Delivery reference differs from the recorded value');
+  async deliver(input: RecordExportDeliveryInput & { keyDigest: string; requestHash: string; deliveredAt: Date }): Promise<LegacyBatchReceipt> {
+    const receipt = required(this.receipts.get(input.receipt_id), input.tenant_id);
+    if (receipt.institution_id !== input.institution_id) throw new LegacyBatchConflictError('Delivery institution does not match the batch');
+    const conflictingKey = [...this.receipts.values()].find((candidate) => candidate.tenant_id === input.tenant_id
+      && candidate.delivery_idempotency_key_digest === input.keyDigest && candidate.id !== input.receipt_id);
+    if (conflictingKey) throw new LegacyBatchConflictError('Delivery Idempotency-Key was already used for another batch');
+    if (receipt.delivery_idempotency_key_digest) {
+      if (receipt.delivery_idempotency_key_digest !== input.keyDigest || receipt.delivery_request_hash !== input.requestHash) {
+        throw new LegacyBatchConflictError('Delivery Idempotency-Key was already used with a different request');
+      }
+      return cloneReceipt(receipt);
     }
+    if (receipt.state === 'DELIVERED') throw new LegacyBatchConflictError('Existing delivery evidence cannot be replaced');
+    if (receipt.state !== 'GENERATED') throw new LegacyBatchStateError('Only generated batches can be delivered');
     receipt.state = 'DELIVERED';
-    receipt.authority_reference = authorityReference;
-    receipt.delivered_at ??= deliveredAt;
+    receipt.authority_reference = input.authority_reference;
+    receipt.delivered_at = input.deliveredAt;
+    receipt.delivery_idempotency_key_digest = input.keyDigest;
+    receipt.delivery_request_hash = input.requestHash;
     receipt.updated_at = new Date();
     return cloneReceipt(receipt);
   }
 
   async metrics(tenantId: string): Promise<LegacyBatchMetrics> {
-    return metricsFrom((await this.list(tenantId, 500)).values());
+    return metricsFrom([...this.receipts.values()].filter((receipt) => receipt.tenant_id === tenantId).values());
   }
 
   async globalMetrics(): Promise<LegacyBatchMetrics> { return metricsFrom(this.receipts.values()); }
@@ -167,10 +198,25 @@ export class PostgresLegacyBatchStore implements LegacyBatchStore {
     });
   }
 
-  async claim(tenantId: string, receiptId: string, leaseUntil: Date): Promise<LegacyBatchReceipt | undefined> {
+  async claim(
+    tenantId: string,
+    receiptId: string,
+    direction: 'EXPORT' | 'IMPORT',
+    leaseUntil: Date,
+    leaseToken: string,
+  ): Promise<LegacyBatchReceipt | undefined> {
     return this.transaction(tenantId, async (client) => {
-      const result = await client.query(`UPDATE legacy_connectors.legacy_batch_receipts SET state='PROCESSING',attempts=attempts+1,"leaseUntil"=$2,"updatedAt"=CURRENT_TIMESTAMP
-        WHERE id=$1 AND attempts < "maxAttempts" AND (state='QUEUED' OR (state='PROCESSING' AND "leaseUntil" <= CURRENT_TIMESTAMP)) RETURNING *`, [receiptId, leaseUntil]);
+      const expired = await client.query(`UPDATE legacy_connectors.legacy_batch_receipts
+        SET state='FAILED',"failureReason"='LEGACY_LEASE_EXPIRED_AFTER_FINAL_ATTEMPT',"leaseUntil"=NULL,"leaseToken"=NULL,"updatedAt"=CURRENT_TIMESTAMP
+        WHERE id=$1 AND direction=$2 AND state='PROCESSING' AND "leaseUntil" <= CURRENT_TIMESTAMP AND attempts >= "maxAttempts" RETURNING *`, [receiptId, direction]);
+      if (expired.rowCount) {
+        await insertAttempt(client, mapReceipt(expired.rows[0]), 'FAILED', 'LEGACY_LEASE_EXPIRED_AFTER_FINAL_ATTEMPT');
+      }
+      const result = await client.query(`UPDATE legacy_connectors.legacy_batch_receipts
+        SET state='PROCESSING',attempts=attempts+1,"leaseUntil"=$3,"leaseToken"=$4,"updatedAt"=CURRENT_TIMESTAMP
+        WHERE id=$1 AND direction=$2 AND attempts < "maxAttempts"
+          AND (state='QUEUED' OR (state='PROCESSING' AND "leaseUntil" <= CURRENT_TIMESTAMP)) RETURNING *`,
+      [receiptId, direction, leaseUntil, leaseToken]);
       return result.rowCount ? mapReceipt(result.rows[0]) : undefined;
     });
   }
@@ -178,52 +224,67 @@ export class PostgresLegacyBatchStore implements LegacyBatchStore {
   async complete(
     tenantId: string, receiptId: string, state: 'GENERATED' | 'VALIDATED' | 'REJECTED',
     result: { sourceCount: number; recordCount: number; totalAmountMinor: string; contentSha256?: string; rejections: BatchValidationError[] },
-    artifact?: LegacyBatchArtifact,
+    artifact: LegacyBatchArtifact | undefined,
+    leaseToken: string,
   ): Promise<LegacyBatchReceipt> {
     return this.transaction(tenantId, async (client) => {
+      const updated = await client.query(`UPDATE legacy_connectors.legacy_batch_receipts SET state=$2,"sourceCount"=$3,"recordCount"=$4,"totalAmountMinor"=$5,"contentSha256"=$6,"rejectionReport"=$7::jsonb,"leaseUntil"=NULL,"leaseToken"=NULL,"failureReason"=NULL,"updatedAt"=CURRENT_TIMESTAMP
+        WHERE id=$1 AND state='PROCESSING' AND "leaseToken"=$8 RETURNING *`, [receiptId, state, result.sourceCount, result.recordCount, result.totalAmountMinor, result.contentSha256 ?? null, JSON.stringify(result.rejections), leaseToken]);
+      if (!updated.rowCount) throw new LegacyBatchStateError('Batch lease is no longer owned by this processor');
       if (artifact) await insertArtifact(client, artifact);
-      const updated = await client.query(`UPDATE legacy_connectors.legacy_batch_receipts SET state=$2,"sourceCount"=$3,"recordCount"=$4,"totalAmountMinor"=$5,"contentSha256"=$6,"rejectionReport"=$7::jsonb,"leaseUntil"=NULL,"failureReason"=NULL,"updatedAt"=CURRENT_TIMESTAMP
-        WHERE id=$1 AND state='PROCESSING' RETURNING *`, [receiptId, state, result.sourceCount, result.recordCount, result.totalAmountMinor, result.contentSha256 ?? null, JSON.stringify(result.rejections)]);
-      if (!updated.rowCount) throw new LegacyBatchStateError('Batch is not being processed');
       await insertAttempt(client, mapReceipt(updated.rows[0]), state === 'REJECTED' ? 'REJECTED' : 'SUCCEEDED');
       return mapReceipt(updated.rows[0]);
     });
   }
 
-  async fail(tenantId: string, receiptId: string, reason: string): Promise<LegacyBatchReceipt> {
+  async fail(tenantId: string, receiptId: string, reason: string, leaseToken: string): Promise<LegacyBatchReceipt> {
     return this.transaction(tenantId, async (client) => {
-      const updated = await client.query(`UPDATE legacy_connectors.legacy_batch_receipts SET state=CASE WHEN attempts >= "maxAttempts" THEN 'FAILED' ELSE 'QUEUED' END,"failureReason"=$2,"leaseUntil"=NULL,"updatedAt"=CURRENT_TIMESTAMP
-        WHERE id=$1 AND state='PROCESSING' RETURNING *`, [receiptId, reason.slice(0, 512)]);
-      if (!updated.rowCount) throw new LegacyBatchStateError('Batch is not being processed');
+      const updated = await client.query(`UPDATE legacy_connectors.legacy_batch_receipts SET state=CASE WHEN attempts >= "maxAttempts" THEN 'FAILED' ELSE 'QUEUED' END,"failureReason"=$2,"leaseUntil"=NULL,"leaseToken"=NULL,"updatedAt"=CURRENT_TIMESTAMP
+        WHERE id=$1 AND state='PROCESSING' AND "leaseToken"=$3 RETURNING *`, [receiptId, reason.slice(0, 512), leaseToken]);
+      if (!updated.rowCount) throw new LegacyBatchStateError('Batch lease is no longer owned by this processor');
       await insertAttempt(client, mapReceipt(updated.rows[0]), 'FAILED', reason.slice(0, 128));
       return mapReceipt(updated.rows[0]);
     });
   }
 
-  async deliver(tenantId: string, receiptId: string, authorityReference: string, deliveredAt: Date): Promise<LegacyBatchReceipt> {
-    return this.transaction(tenantId, async (client) => {
-      const current = await client.query('SELECT * FROM legacy_connectors.legacy_batch_receipts WHERE id=$1 FOR UPDATE', [receiptId]);
+  async deliver(input: RecordExportDeliveryInput & { keyDigest: string; requestHash: string; deliveredAt: Date }): Promise<LegacyBatchReceipt> {
+    return this.transaction(input.tenant_id, async (client) => {
+      const current = await client.query('SELECT * FROM legacy_connectors.legacy_batch_receipts WHERE id=$1 FOR UPDATE', [input.receipt_id]);
       if (!current.rowCount) throw new Error('LEGACY_BATCH_NOT_FOUND');
       const receipt = mapReceipt(current.rows[0]);
-      if (receipt.state !== 'GENERATED' && receipt.state !== 'DELIVERED') throw new LegacyBatchStateError('Only generated batches can be delivered');
-      if (receipt.state === 'DELIVERED' && receipt.authority_reference !== authorityReference) throw new LegacyBatchConflictError('Delivery reference differs from the recorded value');
-      const updated = await client.query(`UPDATE legacy_connectors.legacy_batch_receipts SET state='DELIVERED',"authorityReference"=$2,"deliveredAt"=COALESCE("deliveredAt",$3),"updatedAt"=CURRENT_TIMESTAMP WHERE id=$1 RETURNING *`, [receiptId, authorityReference, deliveredAt]);
+      if (receipt.institution_id !== input.institution_id) throw new LegacyBatchConflictError('Delivery institution does not match the batch');
+      if (receipt.delivery_idempotency_key_digest) {
+        if (receipt.delivery_idempotency_key_digest !== input.keyDigest || receipt.delivery_request_hash !== input.requestHash) {
+          throw new LegacyBatchConflictError('Delivery Idempotency-Key was already used with a different request');
+        }
+        return receipt;
+      }
+      if (receipt.state === 'DELIVERED') throw new LegacyBatchConflictError('Existing delivery evidence cannot be replaced');
+      if (receipt.state !== 'GENERATED') throw new LegacyBatchStateError('Only generated batches can be delivered');
+      let updated;
+      try {
+        updated = await client.query(`UPDATE legacy_connectors.legacy_batch_receipts SET state='DELIVERED',"authorityReference"=$2,"deliveredAt"=$3,"deliveryIdempotencyKeyDigest"=$4,"deliveryRequestHash"=$5,"deliveryCorrelationId"=$6,"deliveryRequestedBy"=$7,"updatedAt"=CURRENT_TIMESTAMP WHERE id=$1 RETURNING *`,
+          [input.receipt_id, input.authority_reference, input.deliveredAt, input.keyDigest, input.requestHash, input.correlation_id, input.requested_by]);
+      } catch (error: any) {
+        if (error?.code === '23505') throw new LegacyBatchConflictError('Delivery Idempotency-Key was already used for another batch');
+        throw error;
+      }
       return mapReceipt(updated.rows[0]);
     });
   }
 
   async metrics(tenantId: string): Promise<LegacyBatchMetrics> {
-    return metricsFrom((await this.list(tenantId, 500)).values());
+    return this.transaction(tenantId, async (client) => {
+      const result = await client.query(`SELECT state, count(*) AS count,
+        COALESCE(sum(jsonb_array_length("rejectionReport")), 0) AS rejection_records
+        FROM legacy_connectors.legacy_batch_receipts GROUP BY state`);
+      return metricsFromRows(result.rows);
+    });
   }
 
   async globalMetrics(): Promise<LegacyBatchMetrics> {
     const result = await this.pool.query('SELECT * FROM legacy_connectors.legacy_batch_status_totals()');
-    const metrics = emptyMetrics();
-    for (const row of result.rows) {
-      metrics[String(row.state).toLowerCase() as Lowercase<LegacyBatchState>] = Number(row.count);
-      metrics.rejection_records += Number(row.rejection_records);
-    }
-    return metrics;
+    return metricsFromRows(result.rows);
   }
 
   async close(): Promise<void> { await this.pool.end(); }
@@ -252,16 +313,23 @@ export class LegacyBatchManager {
     boundedAscii(input.tenant_id, 'tenant_id', 64); boundedAscii(input.institution_id, 'institution_id', 64);
     boundedAscii(input.correlation_id, 'correlation_id', 128); requiredText(input.requested_by, 'requested_by');
     boundedAscii(input.legal_basis_code, 'legal_basis_code', 64);
+    const suppliedGeneratedAt = input.generated_at ? isoTimestamp(input.generated_at) : undefined;
     const request = {
       period_from: isoDate(input.period_from), period_to: isoDate(input.period_to),
-      generated_at: (input.generated_at ? new Date(input.generated_at) : this.now()).toISOString(),
+      generated_at: suppliedGeneratedAt ?? this.now().toISOString(),
       legal_basis_code: input.legal_basis_code, retention_until: isoDate(input.retention_until),
     };
     if (request.period_from > request.period_to) throw new Error('LEGACY_PERIOD_INVALID');
     if (new Date(`${request.retention_until}T00:00:00.000Z`) < minimumRetention(request.period_to)) {
       throw new Error('LEGACY_RETENTION_PERIOD_TOO_SHORT');
     }
-    return this.create(input, 'EXPORT', request, stableHash({ ...request, generated_at: undefined }), undefined);
+    return this.create(input, 'EXPORT', request, stableHash({
+      institution_id: input.institution_id,
+      correlation_id: input.correlation_id,
+      requested_by: input.requested_by,
+      ...request,
+      generated_at: suppliedGeneratedAt,
+    }), undefined);
   }
 
   async stageImport(input: StageLegacyImportInput): Promise<LegacyBatchReceipt> {
@@ -272,7 +340,12 @@ export class LegacyBatchManager {
     const contentSha256 = digest(input.content);
     const request = { filename: input.filename, byte_length: input.content.byteLength, content_sha256: contentSha256 };
     const receiptId = randomUUID();
-    return this.create(input, 'IMPORT', request, stableHash(request), artifact(receiptId, input.tenant_id, input.filename, input.content));
+    return this.create(input, 'IMPORT', request, stableHash({
+      institution_id: input.institution_id,
+      correlation_id: input.correlation_id,
+      requested_by: input.requested_by,
+      ...request,
+    }), artifact(receiptId, input.tenant_id, input.filename, input.content));
   }
 
   async processExport(
@@ -280,12 +353,25 @@ export class LegacyBatchManager {
     receiptId: string,
     source: RegulatoryTransactionRecord[] | (() => Promise<RegulatoryTransactionRecord[]>),
   ): Promise<LegacyBatchReceipt> {
-    const claimed = await this.store.claim(tenantId, receiptId, new Date(this.now().valueOf() + LEASE_MILLISECONDS));
-    if (!claimed) return this.require(tenantId, receiptId);
-    if (claimed.direction !== 'EXPORT') return this.failDirection(claimed);
+    const leaseToken = randomUUID();
+    const claimed = await this.store.claim(tenantId, receiptId, 'EXPORT', new Date(this.now().valueOf() + LEASE_MILLISECONDS), leaseToken);
+    if (!claimed) return this.requireDirection(tenantId, receiptId, 'EXPORT');
+    let records: RegulatoryTransactionRecord[];
     try {
-      const records = typeof source === 'function' ? await source() : source;
+      records = typeof source === 'function' ? await source() : source;
+    } catch (error) {
+      if (error instanceof LegacyBatchSourceRejectedError) {
+        return this.store.complete(tenantId, receiptId, 'REJECTED', {
+          sourceCount: error.sourceCount, recordCount: 0, totalAmountMinor: '0', rejections: error.rejections,
+        }, undefined, leaseToken);
+      }
+      await this.store.fail(tenantId, receiptId, errorCode(error), leaseToken);
+      throw error;
+    }
+    try {
       const request = claimed.request as Record<string, string>;
+      const periodRejections = records.flatMap((record, index) => sourcePeriodRejections(record, index + 1, request));
+      if (periodRejections.length) throw new LegacyBatchSourceRejectedError(periodRejections, records.length);
       const generated = generateRegulatoryTransactionExport({
         export_id: claimed.id, tenant_id: claimed.tenant_id, institution_id: claimed.institution_id,
         period_from: request.period_from, period_to: request.period_to, generated_at: request.generated_at, records,
@@ -294,22 +380,30 @@ export class LegacyBatchManager {
         sourceCount: records.length, recordCount: generated.report.record_count,
         totalAmountMinor: generated.report.total_amount_minor, contentSha256: generated.report.content_sha256,
         rejections: [],
-      }, artifact(receiptId, tenantId, `regulatory-transactions-${receiptId}.dat`, generated.content));
+      }, artifact(receiptId, tenantId, `regulatory-transactions-${receiptId}.dat`, generated.content), leaseToken);
     } catch (error) {
       if (error instanceof LegacyBatchSourceRejectedError) {
         return this.store.complete(tenantId, receiptId, 'REJECTED', {
           sourceCount: error.sourceCount, recordCount: 0, totalAmountMinor: '0', rejections: error.rejections,
-        });
+        }, undefined, leaseToken);
       }
-      await this.store.fail(tenantId, receiptId, errorCode(error));
+      if (isDeterministicGenerationError(error)) {
+        return this.store.complete(tenantId, receiptId, 'REJECTED', {
+          sourceCount: records.length,
+          recordCount: 0,
+          totalAmountMinor: '0',
+          rejections: [{ record: 0, field: 'export', code: errorCode(error).slice(0, 128) }],
+        }, undefined, leaseToken);
+      }
+      await this.store.fail(tenantId, receiptId, errorCode(error), leaseToken);
       throw error;
     }
   }
 
   async processImport(tenantId: string, receiptId: string): Promise<LegacyBatchReceipt> {
-    const claimed = await this.store.claim(tenantId, receiptId, new Date(this.now().valueOf() + LEASE_MILLISECONDS));
-    if (!claimed) return this.require(tenantId, receiptId);
-    if (claimed.direction !== 'IMPORT') return this.failDirection(claimed);
+    const leaseToken = randomUUID();
+    const claimed = await this.store.claim(tenantId, receiptId, 'IMPORT', new Date(this.now().valueOf() + LEASE_MILLISECONDS), leaseToken);
+    if (!claimed) return this.requireDirection(tenantId, receiptId, 'IMPORT');
     try {
       const storedArtifact = await this.store.artifact(tenantId, receiptId);
       if (!storedArtifact) throw new Error('LEGACY_ARTIFACT_NOT_FOUND');
@@ -318,17 +412,35 @@ export class LegacyBatchManager {
         sourceCount: report.record_count, recordCount: report.record_count,
         totalAmountMinor: report.total_amount_minor, contentSha256: report.content_sha256,
         rejections: report.errors,
-      });
+      }, undefined, leaseToken);
     } catch (error) {
-      await this.store.fail(tenantId, receiptId, errorCode(error));
+      await this.store.fail(tenantId, receiptId, errorCode(error), leaseToken);
       throw error;
     }
   }
 
-  async markDelivered(tenantId: string, receiptId: string, authorityReference: string, deliveredAt = this.now()): Promise<LegacyBatchReceipt> {
-    boundedAscii(authorityReference, 'authority_reference', 255);
-    if (Number.isNaN(deliveredAt.valueOf())) throw new Error('LEGACY_DELIVERY_TIMESTAMP_INVALID');
-    return this.store.deliver(tenantId, receiptId, authorityReference, deliveredAt);
+  async markDelivered(input: RecordExportDeliveryInput): Promise<LegacyBatchReceipt> {
+    boundedAscii(input.tenant_id, 'tenant_id', 64);
+    boundedAscii(input.institution_id, 'institution_id', 64);
+    boundedAscii(input.idempotency_key, 'idempotency_key', 255);
+    boundedAscii(input.correlation_id, 'correlation_id', 128);
+    requiredText(input.requested_by, 'requested_by');
+    boundedAscii(input.authority_reference, 'authority_reference', 255);
+    const suppliedDeliveredAt = input.delivered_at ? isoTimestamp(input.delivered_at) : undefined;
+    const requestHash = stableHash({
+      receipt_id: input.receipt_id,
+      institution_id: input.institution_id,
+      correlation_id: input.correlation_id,
+      requested_by: input.requested_by,
+      authority_reference: input.authority_reference,
+      delivered_at: suppliedDeliveredAt,
+    });
+    return this.store.deliver({
+      ...input,
+      keyDigest: digest(input.idempotency_key),
+      requestHash,
+      deliveredAt: suppliedDeliveredAt ? new Date(suppliedDeliveredAt) : this.now(),
+    });
   }
 
   get(tenantId: string, receiptId: string): Promise<LegacyBatchReceipt | undefined> { return this.store.get(tenantId, receiptId); }
@@ -364,9 +476,14 @@ export class LegacyBatchManager {
     return receipt;
   }
 
-  private async failDirection(receipt: LegacyBatchReceipt): Promise<never> {
-    await this.store.fail(receipt.tenant_id, receipt.id, 'LEGACY_BATCH_DIRECTION_INVALID');
-    throw new LegacyBatchStateError('Batch direction is invalid for this processor');
+  private async requireDirection(
+    tenantId: string,
+    receiptId: string,
+    direction: 'EXPORT' | 'IMPORT',
+  ): Promise<LegacyBatchReceipt> {
+    const receipt = await this.require(tenantId, receiptId);
+    if (receipt.direction !== direction) throw new LegacyBatchStateError('Batch direction is invalid for this processor');
+    return receipt;
   }
 }
 
@@ -403,8 +520,11 @@ function mapReceipt(row: QueryResultRow): LegacyBatchReceipt {
     correlation_id: row.correlationId, requested_by: row.requestedBy, state: row.state, request: row.request,
     source_count: row.sourceCount, record_count: row.recordCount, total_amount_minor: row.totalAmountMinor,
     content_sha256: row.contentSha256 ?? undefined, rejection_report: row.rejectionReport, attempts: row.attempts,
-    max_attempts: row.maxAttempts, lease_until: row.leaseUntil ?? undefined, delivered_at: row.deliveredAt ?? undefined,
-    authority_reference: row.authorityReference ?? undefined, failure_reason: row.failureReason ?? undefined,
+    max_attempts: row.maxAttempts, lease_until: row.leaseUntil ?? undefined, lease_token: row.leaseToken ?? undefined,
+    delivered_at: row.deliveredAt ?? undefined, authority_reference: row.authorityReference ?? undefined,
+    delivery_idempotency_key_digest: row.deliveryIdempotencyKeyDigest ?? undefined,
+    delivery_request_hash: row.deliveryRequestHash ?? undefined,
+    failure_reason: row.failureReason ?? undefined,
     created_at: row.createdAt, updated_at: row.updatedAt,
   };
 }
@@ -440,6 +560,14 @@ function metricsFrom(receipts: IterableIterator<LegacyBatchReceipt>): LegacyBatc
 function emptyMetrics(): LegacyBatchMetrics {
   return { queued: 0, processing: 0, generated: 0, validated: 0, rejected: 0, failed: 0, delivered: 0, rejection_records: 0 };
 }
+function metricsFromRows(rows: QueryResultRow[]): LegacyBatchMetrics {
+  const metrics = emptyMetrics();
+  for (const row of rows) {
+    metrics[String(row.state).toLowerCase() as Lowercase<LegacyBatchState>] = Number(row.count);
+    metrics.rejection_records += Number(row.rejection_records);
+  }
+  return metrics;
+}
 
 function stableHash(value: unknown): string { return digest(JSON.stringify(sortValue(value))); }
 function sortValue(value: unknown): unknown {
@@ -454,7 +582,41 @@ function boundedAscii(value: string, field: string, maxLength: number): void {
   if (value.length > maxLength) throw new Error(`LEGACY_FIELD_TOO_LONG:${field}`);
   if (!/^[\x20-\x7e]+$/.test(value)) throw new Error(`LEGACY_NON_ASCII_FIELD:${field}`);
 }
-function isoDate(value: string): string { if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) throw new Error('LEGACY_DATE_INVALID'); return value; }
+function isoDate(value: string): string {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) throw new Error('LEGACY_DATE_INVALID');
+  const parsed = new Date(`${value}T00:00:00.000Z`);
+  if (Number.isNaN(parsed.valueOf()) || parsed.toISOString().slice(0, 10) !== value) throw new Error('LEGACY_DATE_INVALID');
+  return value;
+}
+function isoTimestamp(value: string): string {
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.valueOf())) throw new Error('LEGACY_TIMESTAMP_INVALID');
+  const normalized = parsed.toISOString();
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/.test(value)) throw new Error('LEGACY_TIMESTAMP_INVALID');
+  const canonicalInput = value.length === 20 ? value.replace('Z', '.000Z') : value;
+  if (normalized !== canonicalInput) throw new Error('LEGACY_TIMESTAMP_INVALID');
+  return normalized;
+}
+function sourcePeriodRejections(
+  record: RegulatoryTransactionRecord,
+  index: number,
+  request: Record<string, string>,
+): BatchValidationError[] {
+  let occurredDate: string;
+  try {
+    occurredDate = isoTimestamp(record.occurred_at).slice(0, 10);
+  } catch {
+    return [{ record: index, field: 'occurred_at', code: 'TIMESTAMP_INVALID', reference: record.record_id }];
+  }
+  if (occurredDate < request.period_from || occurredDate > request.period_to) {
+    return [{ record: index, field: 'occurred_at', code: 'OUTSIDE_REQUESTED_PERIOD', reference: record.record_id }];
+  }
+  return [];
+}
+function isDeterministicGenerationError(error: unknown): boolean {
+  const code = errorCode(error);
+  return code.startsWith('LEGACY_') || code.startsWith('GENERATED_EXPORT_INVALID:');
+}
 function minimumRetention(periodTo: string): Date {
   const date = new Date(`${periodTo}T00:00:00.000Z`);
   date.setUTCFullYear(date.getUTCFullYear() + 10);

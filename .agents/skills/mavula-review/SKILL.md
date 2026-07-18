@@ -1,24 +1,37 @@
 ---
 name: mavula-review
-description: Review MAVULA changes across finance-platform, ledger-core, workbench, settlements, operations, and related repositories. Use for pull request reviews, pre-merge checks, security review, database review, migration review, and implementation review in TypeScript, Go, Java, COBOL, Python, PostgreSQL, Redis, Kubernetes, and CI/CD.
+description: Review MAVULA changes across finance-platform, identity-access, ledger-core, workbench, settlements, operations, legacy-connectors, and developer-docs. Use for pull request, security, database, migration, contract, cloud-native, scalability, no-code configuration, and production-readiness reviews in TypeScript, Go, Java, COBOL, Python, PostgreSQL, Redis, Kubernetes, AWS, and CI/CD.
 ---
 
 # MAVULA Review
 
-Use this skill to review MAVULA changes with a finance-grade standard: correctness, security, data safety, maintainability, and module ownership come first.
+Use this skill to review MAVULA changes against the platform's financial,
+security, regulatory, and operational invariants. Findings require a concrete
+failure mode and evidence; labels such as secure, compliant, cloud-native, or
+scalable are never accepted without proof.
+
+## Required Context
+
+Read the relevant references from the companion skill before reviewing:
+
+- Ownership or cross-module changes: `../mavula-cloud-banking/references/module-ownership.md`.
+- User or operator workflows: `../mavula-cloud-banking/references/banking-operations.md`.
+- Authentication, authorization, data, AML, or regulatory changes: `../mavula-cloud-banking/references/security-regulation.md`.
+- Deployments, queues, performance, availability, or production claims: `../mavula-cloud-banking/references/cloud-native-scale.md`.
+- Product, rule, schema, workflow, or no-code changes: `../mavula-cloud-banking/references/composability-no-code.md`.
+- Language, PostgreSQL, Redis, or batch changes: `../mavula-cloud-banking/references/engineering-data.md`.
 
 ## Review Workflow
 
 1. Read the diff, surrounding code, tests, contracts, migrations, and CI configuration touched by the change.
-2. Identify the runtime boundary: application code, ledger/domain logic, settlement process, infrastructure, database, security, or tooling.
-3. Check whether the change preserves module ownership:
-   - `finance-platform` coordinates repository policy, submodules, contracts, and master guardian checks.
-   - `ledger-core` owns ledger and financial invariants.
-   - `workbench` owns orchestration and operator runtime.
-   - `settlements` owns payment and settlement process state.
-   - `operations` owns deployment, secrets wiring, monitoring, and infrastructure.
-4. Verify tests and commands appropriate to the change. Prefer local scripts already defined in `package.json`, module guardians, targeted tests, and CI-equivalent checks.
-5. Report only actionable findings. Avoid praise, broad summaries, speculative rewrites, or style-only comments unless they block maintainability or policy.
+2. Trace the complete operation from authenticated entry to owner transaction,
+   emitted contract, asynchronous processing, audit evidence, and recovery path.
+3. Verify ownership, tenant isolation, financial invariants, compatibility,
+   failure handling, operability, capacity evidence, and regulatory applicability.
+4. Confirm the smallest test set that proves the behavior, then run broader
+   guardian and CI-equivalent checks when the change crosses boundaries.
+5. Report actionable findings only. Do not replace evidence with architecture
+   preference, praise, phase narration, or speculative rewrites.
 
 ## Findings
 
@@ -36,9 +49,9 @@ Verification: command or test that should cover it.
 
 Severity guide:
 
-- `P0`: exploitable security issue, data loss, financial invariant break, or production-wide outage.
-- `P1`: build/CI break, incorrect money movement, tenant isolation failure, migration failure, or deploy blocker.
-- `P2`: realistic runtime bug, retry/idempotency issue, race, performance risk, observability gap, or missing required test.
+- `P0`: exploitable security issue, cross-tenant disclosure, data loss, financial invariant break, or production-wide outage.
+- `P1`: build/CI break, incorrect money movement, authorization bypass, unsafe migration, broken recovery, or production deploy blocker.
+- `P2`: realistic runtime bug, replay/idempotency issue, race, capacity risk, observability gap, contract drift, or missing required test.
 - `P3`: maintainability issue with concrete future cost.
 
 If there are no findings, say so directly and list residual risk or unrun validation.
@@ -49,44 +62,26 @@ Use the language already used in the pull request, issue, or discussion. If the 
 
 Avoid marketing claims, decorative status symbols, phase narration, and long background explanations in review comments.
 
-## Technical Focus
+## Non-Negotiable Review Gates
 
-For TypeScript and Node.js:
-
-- Check async error paths, unhandled promises, transaction boundaries, Prisma schema/client drift, ESM/CJS boundaries, workspace package builds, and typed public exports.
-- Validate idempotency keys, webhook dedupe, outbox/inbox behavior, retries, and DLQ paths.
-
-For Go:
-
-- Check `context.Context` propagation, cancellation, goroutine lifetime, race risks, error wrapping, interface boundaries, SQL transaction handling, and deterministic tests.
-
-For Java:
-
-- Check transaction annotations and boundaries, exception mapping, thread safety, serialization compatibility, dependency injection scope, and database connection handling.
-
-For COBOL:
-
-- Check `PIC` precision and scale, signed and packed decimal fields, copybook compatibility, file layouts, batch restartability, commit points, and reconciliation totals.
-
-For Python:
-
-- Check type coverage, packaging metadata, resource cleanup, deterministic migrations, SQL parameterization, timezone handling, and test isolation.
-
-## Data And Security
-
-Treat database and security review as required for finance changes.
-
-Check database changes for:
-
-- Backward-compatible migrations, rollback path, generated clients, indexes, constraints, foreign keys, locks, long-running statements, and online deploy safety.
-- Tenant isolation, row-level policy assumptions, idempotency, replay safety, outbox/inbox atomicity, webhook dedupe, and reconciliation paths.
-- PostgreSQL query plans where cardinality, indexes, or locks can affect production behavior.
-- Redis key namespacing, TTLs, retry counters, queue semantics, and poison-message behavior.
-
-Check security changes for:
-
-- Authentication, authorization, tenant boundaries, least privilege, secret handling, audit logs, dependency and supply-chain risk, CI token permissions, webhook signatures, injection, SSRF, crypto/TLS use, and PII leakage.
-- No credentials, tokens, private keys, customer data, or `.env` files may be committed or shown in review output.
+- Reject tenant, institution, branch, role, or permission authority derived from
+  request payloads instead of verified identity context.
+- Reject floating-point money, unbalanced journals, mutable posted entries,
+  self-approval, non-atomic audit, or duplicate effects for one idempotency key.
+- Reject direct writes to another module's store and jobs or projections used as
+  the source of truth for command-side financial decisions.
+- Reject webhook effects without signature validation, replay protection,
+  durable dedupe, explicit transitions, and reconciliation.
+- Reject `eval`, `new Function`, mutable published configuration, or unbounded
+  expressions in configurable and no-code runtimes.
+- Reject exactly-once assumptions. Require bounded retry, idempotent handlers,
+  poison-message handling, DLQ policy, authorized replay, and correlation.
+- Reject production-ready or scalable claims without quantified service SLO,
+  workload, data growth, RTO/RPO, failure-domain, and capacity-test evidence.
+- Reject compliance or certification claims without scope, control evidence,
+  responsible approval, and legal validation when required.
+- Never expose credentials, tokens, private keys, customer data, or untracked
+  `.env` content in code or review output.
 
 ## Validation Expectations
 
@@ -99,10 +94,14 @@ pnpm -r build
 git diff --check
 ```
 
-For module changes, run the module-specific guardian and targeted tests before broader builds when possible.
+For module changes, run the module guardian and targeted tests first. For
+cross-repository changes, validate owner contracts, consumer compatibility,
+master guardian, and initialized submodule parity.
 
 ## Agent Behavior
 
-Do not approve your own change. Do not bypass branch protection unless explicitly instructed by a repository owner for a concrete blocked merge.
+Do not approve your own change. Do not bypass branch protection unless an
+authorized repository owner explicitly requests a narrowly scoped exception for
+a concrete blocked merge. Checks and conversation resolution remain mandatory.
 
 When reviewing a pull request, keep the output review-shaped: findings first, then open questions, then validation notes. When implementing a fix, keep edits scoped to the issue, preserve unrelated local work, and update tests or guardian rules when the risk justifies it.

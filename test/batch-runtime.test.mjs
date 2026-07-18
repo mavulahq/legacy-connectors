@@ -115,6 +115,12 @@ test('generates, stores and marks an export delivered idempotently', async () =>
   assert.equal(delivered.state, 'DELIVERED');
   assert.equal((await manager.markDelivered(delivery)).id, receipt.id);
   await assert.rejects(() => manager.markDelivered({
+    ...delivery, idempotency_key: 'idem-delivery-0002',
+  }), LegacyBatchConflictError);
+  await assert.rejects(() => manager.markDelivered({
+    ...delivery, institution_id: 'institution_other',
+  }), LegacyBatchConflictError);
+  await assert.rejects(() => manager.markDelivered({
     ...delivery, authority_reference: 'BM-2026-0002',
   }), LegacyBatchConflictError);
 });
@@ -183,4 +189,17 @@ test('rejects impossible calendar dates', async () => {
   await assert.rejects(() => manager.requestExport({
     ...exportInput, idempotency_key: 'idem-impossible-date', period_from: '2026-02-30',
   }), /LEGACY_DATE_INVALID/);
+  await assert.rejects(() => manager.requestExport({
+    ...exportInput, idempotency_key: 'idem-impossible-timestamp', generated_at: '2026-02-30T00:00:00.000Z',
+  }), /LEGACY_TIMESTAMP_INVALID/);
+});
+
+test('retries source infrastructure errors even when their code starts with LEGACY', async () => {
+  const manager = new LegacyBatchManager(new MemoryLegacyBatchStore(), () => now);
+  const receipt = await manager.requestExport({ ...exportInput, idempotency_key: 'idem-source-timeout' });
+  await assert.rejects(
+    () => manager.processExport(receipt.tenant_id, receipt.id, async () => { throw new Error('LEGACY_SOURCE_TIMEOUT'); }),
+    /LEGACY_SOURCE_TIMEOUT/,
+  );
+  assert.equal((await manager.get(receipt.tenant_id, receipt.id)).state, 'QUEUED');
 });

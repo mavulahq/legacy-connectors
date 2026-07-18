@@ -127,14 +127,18 @@ export class MemoryLegacyBatchStore implements LegacyBatchStore {
 
   async deliver(input: RecordExportDeliveryInput & { keyDigest: string; requestHash: string; deliveredAt: Date }): Promise<LegacyBatchReceipt> {
     const receipt = required(this.receipts.get(input.receipt_id), input.tenant_id);
+    if (receipt.institution_id !== input.institution_id) throw new LegacyBatchConflictError('Delivery institution does not match the batch');
     const conflictingKey = [...this.receipts.values()].find((candidate) => candidate.tenant_id === input.tenant_id
       && candidate.delivery_idempotency_key_digest === input.keyDigest && candidate.id !== input.receipt_id);
     if (conflictingKey) throw new LegacyBatchConflictError('Delivery Idempotency-Key was already used for another batch');
     if (receipt.delivery_idempotency_key_digest) {
-      if (receipt.delivery_request_hash !== input.requestHash) throw new LegacyBatchConflictError('Delivery Idempotency-Key was already used with a different request');
+      if (receipt.delivery_idempotency_key_digest !== input.keyDigest || receipt.delivery_request_hash !== input.requestHash) {
+        throw new LegacyBatchConflictError('Delivery Idempotency-Key was already used with a different request');
+      }
       return cloneReceipt(receipt);
     }
-    if (receipt.state !== 'GENERATED' && receipt.state !== 'DELIVERED') throw new LegacyBatchStateError('Only generated batches can be delivered');
+    if (receipt.state === 'DELIVERED') throw new LegacyBatchConflictError('Existing delivery evidence cannot be replaced');
+    if (receipt.state !== 'GENERATED') throw new LegacyBatchStateError('Only generated batches can be delivered');
     receipt.state = 'DELIVERED';
     receipt.authority_reference = input.authority_reference;
     receipt.delivered_at = input.deliveredAt;
@@ -202,9 +206,12 @@ export class PostgresLegacyBatchStore implements LegacyBatchStore {
     leaseToken: string,
   ): Promise<LegacyBatchReceipt | undefined> {
     return this.transaction(tenantId, async (client) => {
-      await client.query(`UPDATE legacy_connectors.legacy_batch_receipts
+      const expired = await client.query(`UPDATE legacy_connectors.legacy_batch_receipts
         SET state='FAILED',"failureReason"='LEGACY_LEASE_EXPIRED_AFTER_FINAL_ATTEMPT',"leaseUntil"=NULL,"leaseToken"=NULL,"updatedAt"=CURRENT_TIMESTAMP
-        WHERE id=$1 AND direction=$2 AND state='PROCESSING' AND "leaseUntil" <= CURRENT_TIMESTAMP AND attempts >= "maxAttempts"`, [receiptId, direction]);
+        WHERE id=$1 AND direction=$2 AND state='PROCESSING' AND "leaseUntil" <= CURRENT_TIMESTAMP AND attempts >= "maxAttempts" RETURNING *`, [receiptId, direction]);
+      if (expired.rowCount) {
+        await insertAttempt(client, mapReceipt(expired.rows[0]), 'FAILED', 'LEGACY_LEASE_EXPIRED_AFTER_FINAL_ATTEMPT');
+      }
       const result = await client.query(`UPDATE legacy_connectors.legacy_batch_receipts
         SET state='PROCESSING',attempts=attempts+1,"leaseUntil"=$3,"leaseToken"=$4,"updatedAt"=CURRENT_TIMESTAMP
         WHERE id=$1 AND direction=$2 AND attempts < "maxAttempts"
@@ -247,10 +254,13 @@ export class PostgresLegacyBatchStore implements LegacyBatchStore {
       const receipt = mapReceipt(current.rows[0]);
       if (receipt.institution_id !== input.institution_id) throw new LegacyBatchConflictError('Delivery institution does not match the batch');
       if (receipt.delivery_idempotency_key_digest) {
-        if (receipt.delivery_request_hash !== input.requestHash) throw new LegacyBatchConflictError('Delivery Idempotency-Key was already used with a different request');
+        if (receipt.delivery_idempotency_key_digest !== input.keyDigest || receipt.delivery_request_hash !== input.requestHash) {
+          throw new LegacyBatchConflictError('Delivery Idempotency-Key was already used with a different request');
+        }
         return receipt;
       }
-      if (receipt.state !== 'GENERATED' && receipt.state !== 'DELIVERED') throw new LegacyBatchStateError('Only generated batches can be delivered');
+      if (receipt.state === 'DELIVERED') throw new LegacyBatchConflictError('Existing delivery evidence cannot be replaced');
+      if (receipt.state !== 'GENERATED') throw new LegacyBatchStateError('Only generated batches can be delivered');
       let updated;
       try {
         updated = await client.query(`UPDATE legacy_connectors.legacy_batch_receipts SET state='DELIVERED',"authorityReference"=$2,"deliveredAt"=$3,"deliveryIdempotencyKeyDigest"=$4,"deliveryRequestHash"=$5,"deliveryCorrelationId"=$6,"deliveryRequestedBy"=$7,"updatedAt"=CURRENT_TIMESTAMP WHERE id=$1 RETURNING *`,
@@ -346,8 +356,19 @@ export class LegacyBatchManager {
     const leaseToken = randomUUID();
     const claimed = await this.store.claim(tenantId, receiptId, 'EXPORT', new Date(this.now().valueOf() + LEASE_MILLISECONDS), leaseToken);
     if (!claimed) return this.requireDirection(tenantId, receiptId, 'EXPORT');
+    let records: RegulatoryTransactionRecord[];
     try {
-      const records = typeof source === 'function' ? await source() : source;
+      records = typeof source === 'function' ? await source() : source;
+    } catch (error) {
+      if (error instanceof LegacyBatchSourceRejectedError) {
+        return this.store.complete(tenantId, receiptId, 'REJECTED', {
+          sourceCount: error.sourceCount, recordCount: 0, totalAmountMinor: '0', rejections: error.rejections,
+        }, undefined, leaseToken);
+      }
+      await this.store.fail(tenantId, receiptId, errorCode(error), leaseToken);
+      throw error;
+    }
+    try {
       const request = claimed.request as Record<string, string>;
       const periodRejections = records.flatMap((record, index) => sourcePeriodRejections(record, index + 1, request));
       if (periodRejections.length) throw new LegacyBatchSourceRejectedError(periodRejections, records.length);
@@ -368,7 +389,7 @@ export class LegacyBatchManager {
       }
       if (isDeterministicGenerationError(error)) {
         return this.store.complete(tenantId, receiptId, 'REJECTED', {
-          sourceCount: 0,
+          sourceCount: records.length,
           recordCount: 0,
           totalAmountMinor: '0',
           rejections: [{ record: 0, field: 'export', code: errorCode(error).slice(0, 128) }],
@@ -572,6 +593,8 @@ function isoTimestamp(value: string): string {
   if (Number.isNaN(parsed.valueOf())) throw new Error('LEGACY_TIMESTAMP_INVALID');
   const normalized = parsed.toISOString();
   if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/.test(value)) throw new Error('LEGACY_TIMESTAMP_INVALID');
+  const canonicalInput = value.length === 20 ? value.replace('Z', '.000Z') : value;
+  if (normalized !== canonicalInput) throw new Error('LEGACY_TIMESTAMP_INVALID');
   return normalized;
 }
 function sourcePeriodRejections(

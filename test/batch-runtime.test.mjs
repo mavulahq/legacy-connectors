@@ -146,6 +146,7 @@ test('persists deterministic import rejections', async () => {
   assert.equal(rejected.state, 'REJECTED');
   assert.ok(rejected.rejection_report.length > 0);
   assert.equal((await manager.metrics(staged.tenant_id)).rejected, 1);
+  assert.equal((await manager.globalMetrics(staged.tenant_id)).rejected, 1);
 });
 
 test('leases a batch once and prevents invalid processors', async () => {

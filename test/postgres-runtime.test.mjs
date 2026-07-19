@@ -26,7 +26,8 @@ test('PostgreSQL receipts enforce tenant RLS and append-only artifacts', { skip:
   assert.equal(processed.state, 'REJECTED');
   assert.equal(await manager.get(tenantB, receipt.id), undefined);
   assert.equal((await manager.getArtifact(tenantA, receipt.id)).content.toString('ascii'), 'invalid\n');
-  assert.ok((await manager.globalMetrics()).rejected >= 1);
+  assert.ok((await manager.globalMetrics(tenantA)).rejected >= 1);
+  assert.equal((await manager.globalMetrics(tenantB)).rejected, 0);
 
   const pool = new pg.Pool({ connectionString: withoutSchema(runtimeUrl) });
   const client = await pool.connect();

@@ -35,7 +35,7 @@ export interface LegacyBatchStore {
   fail(tenantId: string, receiptId: string, reason: string, leaseToken: string): Promise<LegacyBatchReceipt>;
   deliver(input: RecordExportDeliveryInput & { keyDigest: string; requestHash: string; deliveredAt: Date }): Promise<LegacyBatchReceipt>;
   metrics(tenantId: string): Promise<LegacyBatchMetrics>;
-  globalMetrics(): Promise<LegacyBatchMetrics>;
+  globalMetrics(tenantId: string): Promise<LegacyBatchMetrics>;
   close?(): Promise<void>;
 }
 
@@ -152,7 +152,9 @@ export class MemoryLegacyBatchStore implements LegacyBatchStore {
     return metricsFrom([...this.receipts.values()].filter((receipt) => receipt.tenant_id === tenantId).values());
   }
 
-  async globalMetrics(): Promise<LegacyBatchMetrics> { return metricsFrom(this.receipts.values()); }
+  async globalMetrics(_tenantId: string): Promise<LegacyBatchMetrics> {
+    return metricsFrom(this.receipts.values());
+  }
 }
 
 export class PostgresLegacyBatchStore implements LegacyBatchStore {
@@ -282,9 +284,11 @@ export class PostgresLegacyBatchStore implements LegacyBatchStore {
     });
   }
 
-  async globalMetrics(): Promise<LegacyBatchMetrics> {
-    const result = await this.pool.query('SELECT * FROM legacy_connectors.legacy_batch_status_totals()');
-    return metricsFromRows(result.rows);
+  async globalMetrics(tenantId: string): Promise<LegacyBatchMetrics> {
+    return this.transaction(tenantId, async (client) => {
+      const result = await client.query('SELECT * FROM legacy_connectors.legacy_batch_status_totals()');
+      return metricsFromRows(result.rows);
+    });
   }
 
   async close(): Promise<void> { await this.pool.end(); }
@@ -447,7 +451,9 @@ export class LegacyBatchManager {
   list(tenantId: string, limit?: number): Promise<LegacyBatchReceipt[]> { return this.store.list(tenantId, limit); }
   getArtifact(tenantId: string, receiptId: string): Promise<LegacyBatchArtifact | undefined> { return this.store.artifact(tenantId, receiptId); }
   metrics(tenantId: string): Promise<LegacyBatchMetrics> { return this.store.metrics(tenantId); }
-  globalMetrics(): Promise<LegacyBatchMetrics> { return this.store.globalMetrics(); }
+  globalMetrics(tenantId: string): Promise<LegacyBatchMetrics> {
+    return this.store.globalMetrics(tenantId);
+  }
 
   private async create(
     input: { tenant_id: string; institution_id: string; idempotency_key: string; correlation_id: string; requested_by: string },

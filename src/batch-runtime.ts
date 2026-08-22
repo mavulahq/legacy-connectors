@@ -41,6 +41,8 @@ export class MemoryLegacyBatchStore implements LegacyBatchStore {
   private readonly receipts = new Map<string, LegacyBatchReceipt>();
   private readonly artifacts = new Map<string, LegacyBatchArtifact>();
 
+  constructor(private readonly now: () => Date = () => new Date()) {}
+
   async create(receipt: LegacyBatchReceipt, artifact?: LegacyBatchArtifact): Promise<{ receipt: LegacyBatchReceipt; created: boolean }> {
     const existing = [...this.receipts.values()].find((candidate) => candidate.tenant_id === receipt.tenant_id
       && candidate.direction === receipt.direction && candidate.idempotency_key_digest === receipt.idempotency_key_digest);
@@ -68,7 +70,7 @@ export class MemoryLegacyBatchStore implements LegacyBatchStore {
 
   async claim(tenantId: string, receiptId: string, leaseUntil: Date): Promise<LegacyBatchReceipt | undefined> {
     const receipt = this.receipts.get(receiptId);
-    const now = new Date();
+    const now = this.now();
     if (!receipt || receipt.tenant_id !== tenantId || receipt.attempts >= receipt.max_attempts) return undefined;
     if (receipt.state !== 'QUEUED' && !(receipt.state === 'PROCESSING' && receipt.lease_until && receipt.lease_until <= now)) return undefined;
     receipt.state = 'PROCESSING';

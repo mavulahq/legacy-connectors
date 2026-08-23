@@ -12,6 +12,11 @@ import {
 
 const fixture = readFileSync('contracts/regulatory-transaction-export/v1/examples/regulatory-transaction-export.v1.dat');
 const now = new Date('2026-08-01T08:00:00.000Z');
+const clock = () => now;
+
+function createManager() {
+  return new LegacyBatchManager(new MemoryLegacyBatchStore(clock), clock);
+}
 
 const record = {
   record_id: 'regtxn_demo_001', transaction_id: 'txn_payment_demo_001', transaction_type: 'LOAN_PAYMENT',
@@ -39,7 +44,7 @@ test('generates the canonical fixed-width export deterministically', () => {
 });
 
 test('creates and replays export receipts without retaining the raw idempotency key', async () => {
-  const manager = new LegacyBatchManager(new MemoryLegacyBatchStore(), () => now);
+  const manager = createManager();
   const created = await manager.requestExport(exportInput);
   const replayed = await manager.requestExport(exportInput);
   assert.equal(replayed.id, created.id);
@@ -48,7 +53,7 @@ test('creates and replays export receipts without retaining the raw idempotency 
 });
 
 test('rejects divergent reuse of an idempotency key', async () => {
-  const manager = new LegacyBatchManager(new MemoryLegacyBatchStore(), () => now);
+  const manager = createManager();
   await manager.requestExport(exportInput);
   await assert.rejects(() => manager.requestExport({
     ...exportInput, period_to: '2026-08-31', retention_until: '2036-08-31',
@@ -56,12 +61,12 @@ test('rejects divergent reuse of an idempotency key', async () => {
 });
 
 test('rejects regulatory retention shorter than ten years', async () => {
-  const manager = new LegacyBatchManager(new MemoryLegacyBatchStore(), () => now);
+  const manager = createManager();
   await assert.rejects(() => manager.requestExport({ ...exportInput, retention_until: '2036-07-30' }), /RETENTION_PERIOD_TOO_SHORT/);
 });
 
 test('records deterministic source rejections without retrying the batch', async () => {
-  const manager = new LegacyBatchManager(new MemoryLegacyBatchStore(), () => now);
+  const manager = createManager();
   const receipt = await manager.requestExport({ ...exportInput, idempotency_key: 'idem-source-rejection' });
   const rejected = await manager.processExport(receipt.tenant_id, receipt.id, async () => {
     throw new LegacyBatchSourceRejectedError([
@@ -76,7 +81,7 @@ test('records deterministic source rejections without retrying the batch', async
 });
 
 test('generates, stores and marks an export delivered idempotently', async () => {
-  const manager = new LegacyBatchManager(new MemoryLegacyBatchStore(), () => now);
+  const manager = createManager();
   const receipt = await manager.requestExport(exportInput);
   const generated = await manager.processExport(receipt.tenant_id, receipt.id, [record]);
   assert.equal(generated.state, 'GENERATED');
@@ -91,7 +96,7 @@ test('generates, stores and marks an export delivered idempotently', async () =>
 });
 
 test('validates imports without producing financial effects', async () => {
-  const manager = new LegacyBatchManager(new MemoryLegacyBatchStore(), () => now);
+  const manager = createManager();
   const staged = await manager.stageImport({
     tenant_id: exportInput.tenant_id, institution_id: exportInput.institution_id, idempotency_key: 'idem-import-1',
     correlation_id: 'corr-import-1', requested_by: 'operator-1', filename: 'incoming.dat', content: fixture,
@@ -102,7 +107,7 @@ test('validates imports without producing financial effects', async () => {
 });
 
 test('persists deterministic import rejections', async () => {
-  const manager = new LegacyBatchManager(new MemoryLegacyBatchStore(), () => now);
+  const manager = createManager();
   const staged = await manager.stageImport({
     tenant_id: exportInput.tenant_id, institution_id: exportInput.institution_id, idempotency_key: 'idem-import-invalid',
     correlation_id: 'corr-import-invalid', requested_by: 'operator-1', filename: 'invalid.dat', content: Buffer.from('invalid\n'),
@@ -114,13 +119,14 @@ test('persists deterministic import rejections', async () => {
 });
 
 test('leases a batch once and prevents invalid processors', async () => {
-  const manager = new LegacyBatchManager(new MemoryLegacyBatchStore(), () => now);
+  const manager = createManager();
   const receipt = await manager.requestExport(exportInput);
   const [left, right] = await Promise.all([
     manager.processExport(receipt.tenant_id, receipt.id, [record]),
     manager.processExport(receipt.tenant_id, receipt.id, [record]),
   ]);
   assert.ok([left.state, right.state].includes('GENERATED'));
+  assert.equal([left, right].find((candidate) => candidate.state === 'GENERATED')?.attempts, 1);
   const staged = await manager.stageImport({
     tenant_id: exportInput.tenant_id, institution_id: exportInput.institution_id, idempotency_key: 'idem-wrong-direction',
     correlation_id: 'corr-wrong-direction', requested_by: 'operator-1', filename: 'incoming.dat', content: fixture,

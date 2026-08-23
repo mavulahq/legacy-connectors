@@ -41,6 +41,8 @@ export class MemoryLegacyBatchStore implements LegacyBatchStore {
   private readonly receipts = new Map<string, LegacyBatchReceipt>();
   private readonly artifacts = new Map<string, LegacyBatchArtifact>();
 
+  constructor(private readonly now: () => Date = () => new Date()) {}
+
   async create(receipt: LegacyBatchReceipt, artifact?: LegacyBatchArtifact): Promise<{ receipt: LegacyBatchReceipt; created: boolean }> {
     const existing = [...this.receipts.values()].find((candidate) => candidate.tenant_id === receipt.tenant_id
       && candidate.direction === receipt.direction && candidate.idempotency_key_digest === receipt.idempotency_key_digest);
@@ -68,7 +70,7 @@ export class MemoryLegacyBatchStore implements LegacyBatchStore {
 
   async claim(tenantId: string, receiptId: string, leaseUntil: Date): Promise<LegacyBatchReceipt | undefined> {
     const receipt = this.receipts.get(receiptId);
-    const now = new Date();
+    const now = this.now();
     if (!receipt || receipt.tenant_id !== tenantId || receipt.attempts >= receipt.max_attempts) return undefined;
     if (receipt.state !== 'QUEUED' && !(receipt.state === 'PROCESSING' && receipt.lease_until && receipt.lease_until <= now)) return undefined;
     receipt.state = 'PROCESSING';
@@ -290,18 +292,20 @@ export class LegacyBatchManager {
         export_id: claimed.id, tenant_id: claimed.tenant_id, institution_id: claimed.institution_id,
         period_from: request.period_from, period_to: request.period_to, generated_at: request.generated_at, records,
       });
-      return this.store.complete(tenantId, receiptId, 'GENERATED', {
+      return await this.completeOrExisting(tenantId, receiptId, () => this.store.complete(tenantId, receiptId, 'GENERATED', {
         sourceCount: records.length, recordCount: generated.report.record_count,
         totalAmountMinor: generated.report.total_amount_minor, contentSha256: generated.report.content_sha256,
         rejections: [],
-      }, artifact(receiptId, tenantId, `regulatory-transactions-${receiptId}.dat`, generated.content));
+      }, artifact(receiptId, tenantId, `regulatory-transactions-${receiptId}.dat`, generated.content)));
     } catch (error) {
       if (error instanceof LegacyBatchSourceRejectedError) {
-        return this.store.complete(tenantId, receiptId, 'REJECTED', {
-          sourceCount: error.sourceCount, recordCount: 0, totalAmountMinor: '0', rejections: error.rejections,
-        });
+        const sourceCount = error.sourceCount;
+        const rejections = error.rejections;
+        return this.completeOrExisting(tenantId, receiptId, () => this.store.complete(tenantId, receiptId, 'REJECTED', {
+          sourceCount, recordCount: 0, totalAmountMinor: '0', rejections,
+        }));
       }
-      await this.store.fail(tenantId, receiptId, errorCode(error));
+      await this.failOwned(tenantId, receiptId, errorCode(error));
       throw error;
     }
   }
@@ -314,13 +318,13 @@ export class LegacyBatchManager {
       const storedArtifact = await this.store.artifact(tenantId, receiptId);
       if (!storedArtifact) throw new Error('LEGACY_ARTIFACT_NOT_FOUND');
       const report = validateRegulatoryTransactionExport(storedArtifact.content);
-      return this.store.complete(tenantId, receiptId, report.accepted ? 'VALIDATED' : 'REJECTED', {
+      return await this.completeOrExisting(tenantId, receiptId, () => this.store.complete(tenantId, receiptId, report.accepted ? 'VALIDATED' : 'REJECTED', {
         sourceCount: report.record_count, recordCount: report.record_count,
         totalAmountMinor: report.total_amount_minor, contentSha256: report.content_sha256,
         rejections: report.errors,
-      });
+      }));
     } catch (error) {
-      await this.store.fail(tenantId, receiptId, errorCode(error));
+      await this.failOwned(tenantId, receiptId, errorCode(error));
       throw error;
     }
   }
@@ -362,6 +366,31 @@ export class LegacyBatchManager {
     const receipt = await this.store.get(tenantId, receiptId);
     if (!receipt) throw new Error('LEGACY_BATCH_NOT_FOUND');
     return receipt;
+  }
+
+  private async completeOrExisting(
+    tenantId: string,
+    receiptId: string,
+    complete: () => Promise<LegacyBatchReceipt>,
+  ): Promise<LegacyBatchReceipt> {
+    try {
+      return await complete();
+    } catch (error) {
+      if (!(error instanceof LegacyBatchStateError)) throw error;
+      const current = await this.require(tenantId, receiptId);
+      if (current.state === 'GENERATED' || current.state === 'VALIDATED' || current.state === 'REJECTED' || current.state === 'DELIVERED') {
+        return current;
+      }
+      throw error;
+    }
+  }
+
+  private async failOwned(tenantId: string, receiptId: string, reason: string): Promise<void> {
+    try {
+      await this.store.fail(tenantId, receiptId, reason);
+    } catch (error) {
+      if (!(error instanceof LegacyBatchStateError)) throw error;
+    }
   }
 
   private async failDirection(receipt: LegacyBatchReceipt): Promise<never> {
